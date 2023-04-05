@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,19 @@ import (
 	"time"
 )
 
+type PromData struct {
+	Status string `json:"status"`
+	Data   struct {
+		ResultType string `json:"resultType"`
+		Result     []struct {
+			Metric struct {
+				Pod string `json:"pod"`
+			} `json:"metric"`
+			Values [][]interface{} `json:"values"`
+		} `json:"result"`
+	} `json:"data"`
+}
+
 var config = make(map[string]string)
 
 func init() {
@@ -29,8 +43,8 @@ func init() {
 	config["cloud2-prom"] = "http://rpulsarless.freeddns.org:31005/"
 }
 
-var memory_query = "sum by (pod) (container_memory_working_set_bytes{cluster=\"\",container!=\"\",image!=\"\",job=\"kubelet\",metrics_path=\"/metrics/cadvisor\",namespace=\"openfaas-fn\"})/1000000"
-var cpu_query = "sum (rate (container_cpu_usage_seconds_total{image!=\"\", namespace=\"openfaas-fn\"}[1m])) by (pod)"
+var memoryQuery = "sum by (pod) (container_memory_working_set_bytes{cluster=\"\",container!=\"\",image!=\"\",job=\"kubelet\",metrics_path=\"/metrics/cadvisor\",namespace=\"openfaas-fn\"})/1000000"
+var cpuQuery = "sum (rate (container_cpu_usage_seconds_total{image!=\"\", namespace=\"openfaas-fn\"}[1m])) by (pod)"
 
 func connectMongo() *mongo.Client {
 	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
@@ -47,7 +61,7 @@ func connectMongo() *mongo.Client {
 	return client
 }
 
-func insertDocument(collectionName string, doc bson.M, c chan int) {
+func insertDocument(collectionName string, doc bson.M) {
 	var client = connectMongo()
 	collection := client.Database(config["db"]).Collection(collectionName)
 	res, err := collection.InsertOne(context.Background(), doc)
@@ -59,56 +73,71 @@ func insertDocument(collectionName string, doc bson.M, c chan int) {
 	}
 	if err != nil {
 		fmt.Printf("Something wrong disconnecting client")
-		c <- -1
-	} else {
-		c <- 1
 	}
 }
-func queryPrometheus(fun string, node string, startTime int64, endTime int64, duration int64, op string) {
+
+func parsePromData(jsonString string, fun string) (val [][]interface{}) {
+	var data PromData
+	json.Unmarshal([]byte(jsonString), &data)
+	for _, value := range data.Data.Result {
+		var pod = value.Metric.Pod
+		if strings.HasPrefix(pod, fun) {
+			val = value.Values
+			return
+		}
+	}
+	return
+}
+func queryPrometheus(fun string, node string, startTime time.Time, endTime time.Time, op string) ([][]interface{}, error) {
 	var ep = config[node+"-prom"] + "/api/v1/query_range"
 	//var ep = "https://webhook.site/fb5cf153-c9ac-4ca7-9ac7-7cfc94541e62"
 	req, _ := http.NewRequest("POST", ep, nil)
 
 	params := req.URL.Query()
-	var start = time.Unix(0, startTime).UTC()
-	var end = start.Add(time.Duration(int64(time.Second) * duration))
+	var start = startTime.UTC()
+	var end = endTime.UTC()
 	params.Add("start", start.Format(time.RFC3339))
 	params.Add("end", end.Format(time.RFC3339))
 	params.Add("step", "1s")
 	if op == "memory" {
-		params.Add("query", memory_query)
+		params.Add("query", memoryQuery)
 	} else {
-		params.Add("query", cpu_query)
+		params.Add("query", cpuQuery)
 	}
 	req.URL.RawQuery = params.Encode()
 	res, _ := http.DefaultClient.Do(req)
 	var resBody, _ = ioutil.ReadAll(res.Body)
-	fmt.Printf("Request %v %v\n", ep, params)
-	fmt.Printf("%v Received body %s\n", res.StatusCode, resBody)
-
+	if res.StatusCode == 200 {
+		var metric = parsePromData(string(resBody), fun)
+		return metric, nil
+	}
+	return nil, nil
 }
 
-func logMongo(fun string, node string, startTime int64, endTime int64, duration int64) {
-	var doc = bson.M{"function": fun, "node": node, "startTime": startTime, "endTime": endTime, "duration": duration}
-	c := make(chan int)
-	go insertDocument("logs", doc, c)
-	if x := <-c; x == -1 {
-		fmt.Printf("Something wrong writing log on mongodb")
-	} else {
-		go queryPrometheus(fun, node, startTime, endTime, duration, "memory")
-		go queryPrometheus(fun, node, startTime, endTime, duration, "cpu")
-	}
+func logMongo(fun string, node string, startTime time.Time, endTime time.Time, duration time.Duration) {
+	var mem, cpu [][]interface{}
+
+	mem, _ = queryPrometheus(fun, node, startTime, endTime, "memory")
+	cpu, _ = queryPrometheus(fun, node, startTime, endTime, "cpu")
+	var doc = bson.M{"function": fun, "node": node, "startTime": startTime, "endTime": endTime, "duration": duration, "cpu": cpu, "mem": mem}
+	insertDocument("logs", doc)
 
 }
 
 func logRequest(node string, fun string, r http.Response) {
 	if r.StatusCode >= 200 && r.StatusCode <= 299 {
-		var duration, _ = strconv.ParseInt(r.Header.Get("X-Duration-Seconds"), 10, 64)
-		var startTime, _ = strconv.ParseInt(r.Header.Get("X-Start-Time"), 10, 64)
-		var endTime = startTime + duration
 
-		fmt.Printf("LOG: %v, %v, %v, %v, %v", node, fun, startTime, duration, endTime)
-		logMongo(fun, node, startTime, endTime, duration)
+		var durationString = r.Header.Get("X-Duration-Seconds")
+		var startString = r.Header.Get("X-Start-Time")
+		var durNum, _ = strconv.ParseFloat(durationString, 64)
+		var startNum, _ = strconv.ParseInt(startString, 10, 64)
+
+		var start = time.Unix(0, startNum)
+		var duration = time.Duration(float64(time.Second) * durNum)
+		var end = start.Add(duration)
+
+		fmt.Printf("LOG: %v, %v, %v, %v, %v\n", node, fun, start, end, duration)
+		logMongo(fun, node, start, end, duration)
 	} else {
 		fmt.Printf("Status code %v\n", r.StatusCode)
 	}
@@ -118,10 +147,9 @@ func forwardResponse(node string, fun string, headers map[string][]string, body 
 	client := http.Client{}
 	var base, ok = config[node]
 	if !ok {
-		return &http.Response{}, errors.New("Not valid node")
+		return &http.Response{}, errors.New("not valid node")
 	}
 	var url = base + fun
-	//var url = "https://www.sci.utah.edu/wrong.html"
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header = headers
 	res, err := client.Do(req)
@@ -130,7 +158,7 @@ func forwardResponse(node string, fun string, headers map[string][]string, body 
 	} else {
 		log.Printf("Forward to %v\n", url)
 	}
-	logRequest(node, fun, *res)
+	go logRequest(node, fun, *res)
 	return res, err
 }
 
