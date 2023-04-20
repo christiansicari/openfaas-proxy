@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/RP-Proxy.iml" filepath="$PROJECT_DIR$/.idea/RP-Proxy.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../of-stress-test/.idea/of-stress-test.iml" filepath="$PROJECT_DIR$/../of-stress-test/.idea/of-stress-test.iml" />
     </modules>
   </component>
 </project>

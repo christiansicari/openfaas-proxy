@@ -36,11 +36,11 @@ var config = make(map[string]string)
 
 func init() {
 	config["cloud1"] = "http://rpulsarless.freeddns.org:32006/function/"
-	config["edge1"] = "http://rpulsarless.freeddns.org:32006/function/"
+	config["laptop"] = "http://laptop.rpulsarless.freeddns.org:31112/function/"
+	config["cloud1-prom"] = "http://rpulsarless.freeddns.org:31005/"
+	config["laptop-prom"] = "http://laptop.rpulsarless.freeddns.org:31837/"
 	config["mongo"] = "mongodb://10.8.0.1"
 	config["db"] = "rpulsar"
-	config["cloud1-prom"] = "http://rpulsarless.freeddns.org:31005/"
-	config["cloud2-prom"] = "http://rpulsarless.freeddns.org:31005/"
 }
 
 var memoryQuery = "sum by (pod) (container_memory_working_set_bytes{cluster=\"\",container!=\"\",image!=\"\",job=\"kubelet\",metrics_path=\"/metrics/cadvisor\",namespace=\"openfaas-fn\"})/1000000"
@@ -90,7 +90,6 @@ func parsePromData(jsonString string, fun string) (val [][]interface{}) {
 }
 func queryPrometheus(fun string, node string, startTime time.Time, endTime time.Time, op string) ([][]interface{}, error) {
 	var ep = config[node+"-prom"] + "/api/v1/query_range"
-	//var ep = "https://webhook.site/fb5cf153-c9ac-4ca7-9ac7-7cfc94541e62"
 	req, _ := http.NewRequest("POST", ep, nil)
 
 	params := req.URL.Query()
@@ -114,17 +113,20 @@ func queryPrometheus(fun string, node string, startTime time.Time, endTime time.
 	return nil, nil
 }
 
-func logMongo(fun string, node string, startTime time.Time, endTime time.Time, duration time.Duration) {
+func logMongo(fun string, node string, startTime time.Time, endTime time.Time, duration time.Duration, params map[string][]string) {
 	var mem, cpu [][]interface{}
-
+	var p = make(map[string]string)
 	mem, _ = queryPrometheus(fun, node, startTime, endTime, "memory")
 	cpu, _ = queryPrometheus(fun, node, startTime, endTime, "cpu")
-	var doc = bson.M{"function": fun, "node": node, "startTime": startTime, "endTime": endTime, "duration": duration, "cpu": cpu, "mem": mem}
-	insertDocument("logs", doc)
+	for key, values := range params {
+		p[key] = values[0]
+	}
+	var doc = bson.M{"function": fun, "node": node, "startTime": startTime, "endTime": endTime, "duration": duration, "cpu": cpu, "mem": mem, "params": p}
+	insertDocument("logs2", doc)
 
 }
 
-func logRequest(node string, fun string, r http.Response) {
+func logRequest(node string, fun string, r http.Response, params map[string][]string) {
 	if r.StatusCode >= 200 && r.StatusCode <= 299 {
 
 		var durationString = r.Header.Get("X-Duration-Seconds")
@@ -133,11 +135,11 @@ func logRequest(node string, fun string, r http.Response) {
 		var startNum, _ = strconv.ParseInt(startString, 10, 64)
 
 		var start = time.Unix(0, startNum)
-		var duration = time.Duration(float64(time.Second) * durNum)
+		var duration = time.Duration(float64(time.Second) * durNum) // nanosecond
 		var end = start.Add(duration)
 
 		fmt.Printf("LOG: %v, %v, %v, %v, %v\n", node, fun, start, end, duration)
-		logMongo(fun, node, start, end, duration)
+		logMongo(fun, node, start, end, duration, params)
 	} else {
 		fmt.Printf("Status code %v\n", r.StatusCode)
 	}
@@ -158,7 +160,6 @@ func forwardResponse(node string, fun string, headers map[string][]string, body 
 	} else {
 		log.Printf("Forward to %v\n", url)
 	}
-	go logRequest(node, fun, *res)
 	return res, err
 }
 
@@ -186,16 +187,16 @@ func proxy(c *gin.Context) {
 	}
 	fheaders["content-type"] = []string{contenttype}
 	res, err := forwardResponse(node, fun, fheaders, body)
+	paramPairs := c.Request.URL.Query()
+	go logRequest(node, fun, *res, paramPairs)
 	if err != nil {
 		log.Printf("Error %v\n", err)
 		c.Status(http.StatusBadRequest)
 		return
 	}
-	var bodyBytes []byte
-	if res.StatusCode >= 200 && res.StatusCode <= 299 {
-		bodyBytes, _ = io.ReadAll(res.Body)
-	} else {
-		fmt.Printf("Not 200 response from OpenFaaS: %v\n", res.StatusCode)
+	var bodyBytes, _ = io.ReadAll(res.Body)
+	if !(res.StatusCode >= 200 && res.StatusCode <= 299) {
+		fmt.Printf("Error %v from OpenFaaS: %v\n", res.StatusCode, string(bodyBytes))
 	}
 	c.Data(res.StatusCode, res.Header.Get("content-type"), bodyBytes)
 }
