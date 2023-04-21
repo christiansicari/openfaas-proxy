@@ -6,5 +6,6 @@
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="module" module-name="of-stress-test" />
+    <orderEntry type="module" module-name="parseJson" />
   </component>
 </module>

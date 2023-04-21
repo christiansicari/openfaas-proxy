@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
@@ -14,8 +13,10 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,15 +33,43 @@ type PromData struct {
 	} `json:"data"`
 }
 
-var config = make(map[string]string)
+type Node struct {
+	Of   string `json:"of"`
+	Prom string `json:"prom"`
+}
+type Config struct {
+	Nodes         map[string]Node `json:"nodes"`
+	Mongo         string          `json:"mongo"`
+	Db            string          `json:"db"`
+	Coll          string          `json:"coll"`
+	BufferSize    int             `json:"bufferSize"`
+	TimeoutFlush  float64         `json:"timeoutFlush"`
+	ListeningHost string          `json:listeningHost`
+}
+
+type Buffer struct {
+	mu   sync.Mutex
+	docs []bson.M
+}
+
+var config Config
+var mongoBuffer chan bson.M
+var lastMongoFetch time.Time
 
 func init() {
-	config["cloud1"] = "http://rpulsarless.freeddns.org:32006/function/"
-	config["laptop"] = "http://laptop.rpulsarless.freeddns.org:31112/function/"
-	config["cloud1-prom"] = "http://rpulsarless.freeddns.org:31005/"
-	config["laptop-prom"] = "http://laptop.rpulsarless.freeddns.org:31837/"
-	config["mongo"] = "mongodb://10.8.0.1"
-	config["db"] = "rpulsar"
+	configFile, err := os.Open("./config.json")
+	if err != nil {
+		panic("Error parsing json config file\n")
+	}
+	byteValue, _ := ioutil.ReadAll(configFile)
+	err = json.Unmarshal(byteValue, &config)
+	if err != nil {
+		panic(err)
+	}
+
+	mongoBuffer = make(chan bson.M, config.BufferSize)
+	lastMongoFetch = time.Now()
+	connectMongo()
 }
 
 var memoryQuery = "sum by (pod) (container_memory_working_set_bytes{cluster=\"\",container!=\"\",image!=\"\",job=\"kubelet\",metrics_path=\"/metrics/cadvisor\",namespace=\"openfaas-fn\"})/1000000"
@@ -48,7 +77,7 @@ var cpuQuery = "sum (rate (container_cpu_usage_seconds_total{image!=\"\", namesp
 
 func connectMongo() *mongo.Client {
 	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
-	opts := options.Client().ApplyURI(config["mongo"]).SetServerAPIOptions(serverAPI)
+	opts := options.Client().ApplyURI(config.Mongo).SetServerAPIOptions(serverAPI)
 	client, err := mongo.Connect(context.TODO(), opts)
 	if err != nil {
 		panic(err)
@@ -57,13 +86,70 @@ func connectMongo() *mongo.Client {
 	if err := client.Database("admin").RunCommand(context.TODO(), bson.D{{"ping", 1}}).Decode(&result); err != nil {
 		panic(err)
 	}
-	fmt.Println("Pinged your deployment. You successfully connected to MongoDB!")
+	//fmt.Println("Pinged your deployment. You successfully connected to MongoDB!")
 	return client
+}
+
+func ToSliceOfAny[T any](s []T) []any {
+	result := make([]any, len(s))
+	for i, v := range s {
+		result[i] = v
+	}
+	return result
+}
+
+func dataMonitor() {
+	var buffer Buffer
+	ticker := time.NewTicker(time.Duration(config.TimeoutFlush * float64(time.Second)))
+	go timedFlush(ticker, &buffer)
+	for {
+		doc := <-mongoBuffer
+		buffer.mu.Lock()
+		buffer.docs = append(buffer.docs, doc)
+		if len(buffer.docs) >= config.BufferSize {
+			flushBuffer(&buffer)
+		}
+		buffer.mu.Unlock()
+	}
+}
+
+func timedFlush(ticker *time.Ticker, buffer *Buffer) {
+	for {
+		<-ticker.C
+		var timediff = time.Now().Sub(lastMongoFetch)
+		var timeout = time.Duration(config.TimeoutFlush * float64(time.Second))
+		if timediff > timeout {
+			buffer.mu.Lock()
+			if len(buffer.docs) > 0 {
+				fmt.Println("Automatic buffer flush triggered")
+				flushBuffer(buffer)
+			}
+			buffer.mu.Unlock()
+		}
+
+	}
+}
+
+func flushBuffer(buffer *Buffer) {
+	insertMany(config.Coll, ToSliceOfAny(buffer.docs))
+	buffer.docs = nil
+	lastMongoFetch = time.Now()
+}
+
+func insertMany(collectionName string, docs []interface{}) {
+	var client = connectMongo()
+	collection := client.Database(config.Db).Collection(collectionName)
+	_, err := collection.InsertMany(context.TODO(), docs)
+	if err != nil {
+		fmt.Printf("Error during the bulk insert\n")
+	} else {
+		fmt.Printf("Bulk Insert: %v documents\n", len(docs))
+	}
 }
 
 func insertDocument(collectionName string, doc bson.M) {
 	var client = connectMongo()
-	collection := client.Database(config["db"]).Collection(collectionName)
+	collection := client.Database(config.Db).Collection(collectionName)
 	res, err := collection.InsertOne(context.Background(), doc)
 	err = client.Disconnect(context.TODO())
 	if err != nil {
@@ -89,7 +175,8 @@ func parsePromData(jsonString string, fun string) (val [][]interface{}) {
 	return
 }
 func queryPrometheus(fun string, node string, startTime time.Time, endTime time.Time, op string) ([][]interface{}, error) {
-	var ep = config[node+"-prom"] + "/api/v1/query_range"
+
+	var ep = config.Nodes[node].Prom + "/api/v1/query_range"
 	req, _ := http.NewRequest("POST", ep, nil)
 
 	params := req.URL.Query()
@@ -113,7 +200,7 @@ func queryPrometheus(fun string, node string, startTime time.Time, endTime time.
 	return nil, nil
 }
 
-func logMongo(fun string, node string, startTime time.Time, endTime time.Time, duration time.Duration, params map[string][]string) {
+func logMongo(fun string, node string, startTime time.Time, endTime time.Time, duration time.Duration, computation time.Duration, params map[string][]string) {
 	var mem, cpu [][]interface{}
 	var p = make(map[string]string)
 	mem, _ = queryPrometheus(fun, node, startTime, endTime, "memory")
@@ -121,36 +208,39 @@ func logMongo(fun string, node string, startTime time.Time, endTime time.Time, d
 	for key, values := range params {
 		p[key] = values[0]
 	}
-	var doc = bson.M{"function": fun, "node": node, "startTime": startTime, "endTime": endTime, "duration": duration, "cpu": cpu, "mem": mem, "params": p}
-	insertDocument("logs2", doc)
+	var doc = bson.M{"function": fun, "node": node, "startTime": startTime, "endTime": endTime, "duration": duration, "computationTime": computation, "cpu": cpu, "mem": mem, "params": p}
+	//insertDocument(DBCOLL, doc)
+	fmt.Printf("Pushed doc to buffer\n")
+	mongoBuffer <- doc
 
 }
 
 func logRequest(node string, fun string, r http.Response, params map[string][]string) {
 	if r.StatusCode >= 200 && r.StatusCode <= 299 {
-
 		var durationString = r.Header.Get("X-Duration-Seconds")
 		var startString = r.Header.Get("X-Start-Time")
+		var compDuration = r.Header.Get("X-Computation-Seconds")
 		var durNum, _ = strconv.ParseFloat(durationString, 64)
 		var startNum, _ = strconv.ParseInt(startString, 10, 64)
+		var compNum, _ = strconv.ParseFloat(compDuration, 64)
 
 		var start = time.Unix(0, startNum)
-		var duration = time.Duration(float64(time.Second) * durNum) // nanosecond
+		var duration = time.Duration(float64(time.Second) * durNum)     // nanosecond
+		var computation = time.Duration(float64(time.Second) * compNum) // nanosecond
+
 		var end = start.Add(duration)
 
 		fmt.Printf("LOG: %v, %v, %v, %v, %v\n", node, fun, start, end, duration)
-		logMongo(fun, node, start, end, duration, params)
+		logMongo(fun, node, start, end, duration, computation, params)
 	} else {
 		fmt.Printf("Status code %v\n", r.StatusCode)
 	}
+
 }
 
 func forwardResponse(node string, fun string, headers map[string][]string, body []byte) (*http.Response, error) {
 	client := http.Client{}
-	var base, ok = config[node]
-	if !ok {
-		return &http.Response{}, errors.New("not valid node")
-	}
+	var base = config.Nodes[node].Of
 	var url = base + fun
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header = headers
@@ -203,6 +293,8 @@ func proxy(c *gin.Context) {
 
 func main() {
 	var router = gin.Default()
+	go dataMonitor()
 	router.POST("/proxy", proxy)
-	router.Run("localhost:8080")
+	router.Run(config.ListeningHost)
+	_ = 1
 }

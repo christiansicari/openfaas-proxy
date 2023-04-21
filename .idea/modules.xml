@@ -4,6 +4,7 @@
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/RP-Proxy.iml" filepath="$PROJECT_DIR$/.idea/RP-Proxy.iml" />
       <module fileurl="file://$PROJECT_DIR$/../of-stress-test/.idea/of-stress-test.iml" filepath="$PROJECT_DIR$/../of-stress-test/.idea/of-stress-test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../parseJson/.idea/parseJson.iml" filepath="$PROJECT_DIR$/../parseJson/.idea/parseJson.iml" />
     </modules>
   </component>
 </project>

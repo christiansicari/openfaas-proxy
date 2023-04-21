@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteTargetsManager">
+    <targets>
+      <target name="csicari@ms0631.utah.cloudlab.us:22" type="ssh/sftp" uuid="6d57ca2e-c5c4-4c79-a09e-7816e8ce9e78">
+        <config>
+          <option name="projectRootOnTarget" value="/users/csicari/RP-Proxy" />
+          <option name="serverName" value="csicari@ms0631.utah.cloudlab.us:22 key" />
+          <option name="useRsync" value="true" />
+        </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="goPath" value="/users/csicari/go" />
+            <option name="goRoot" value="/usr/local/go/bin/go" />
+            <option name="goVersion" value="go1.20.3 linux/arm64" />
+          </config>
+        </ContributedStateBase>
+      </target>
+    </targets>
+  </component>
+</project>
