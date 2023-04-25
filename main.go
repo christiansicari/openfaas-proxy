@@ -55,6 +55,7 @@ type Buffer struct {
 var config Config
 var mongoBuffer chan bson.M
 var lastMongoFetch time.Time
+var mongoClient *mongo.Client
 
 func init() {
 	configFile, err := os.Open("./config.json")
@@ -69,7 +70,7 @@ func init() {
 
 	mongoBuffer = make(chan bson.M, config.BufferSize)
 	lastMongoFetch = time.Now()
-	connectMongo()
+	mongoClient = connectMongo()
 }
 
 var memoryQuery = "sum by (pod) (container_memory_working_set_bytes{cluster=\"\",container!=\"\",image!=\"\",job=\"kubelet\",metrics_path=\"/metrics/cadvisor\",namespace=\"openfaas-fn\"})/1000000"
@@ -88,6 +89,16 @@ func connectMongo() *mongo.Client {
 	}
 	//fmt.Println("Pinged your deployment. You successfully connected to MongoDB!")
 	return client
+}
+
+func getDb() *mongo.Client {
+	var result bson.M
+	if mongoClient == nil {
+		mongoClient = connectMongo()
+	} else if err := mongoClient.Database("admin").RunCommand(context.TODO(), bson.D{{"ping", 1}}).Decode(&result); err != nil {
+		mongoClient = connectMongo()
+	}
+	return mongoClient
 }
 
 func ToSliceOfAny[T any](s []T) []any {
@@ -137,7 +148,7 @@ func flushBuffer(buffer *Buffer) {
 }
 
 func insertMany(collectionName string, docs []interface{}) {
-	var client = connectMongo()
+	var client = getDb()
 	collection := client.Database(config.Db).Collection(collectionName)
 	_, err := collection.InsertMany(context.TODO(), docs)
 	if err != nil {
@@ -148,7 +159,7 @@ func insertMany(collectionName string, docs []interface{}) {
 }
 
 func insertDocument(collectionName string, doc bson.M) {
-	var client = connectMongo()
+	var client = getDb()
 	collection := client.Database(config.Db).Collection(collectionName)
 	res, err := collection.InsertOne(context.Background(), doc)
 	err = client.Disconnect(context.TODO())
@@ -210,7 +221,7 @@ func logMongo(fun string, node string, startTime time.Time, endTime time.Time, d
 	}
 	var doc = bson.M{"function": fun, "node": node, "startTime": startTime, "endTime": endTime, "duration": duration, "computationTime": computation, "cpu": cpu, "mem": mem, "params": p}
 	//insertDocument(DBCOLL, doc)
-	fmt.Printf("Pushed doc to buffer\n")
+	//fmt.Printf("Pushed doc to buffer\n")
 	mongoBuffer <- doc
 
 }
