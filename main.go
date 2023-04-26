@@ -78,7 +78,7 @@ var cpuQuery = "sum (rate (container_cpu_usage_seconds_total{image!=\"\", namesp
 
 func connectMongo() *mongo.Client {
 	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
-	opts := options.Client().ApplyURI(config.Mongo).SetServerAPIOptions(serverAPI)
+	opts := options.Client().ApplyURI(config.Mongo).SetServerAPIOptions(serverAPI).SetMaxPoolSize(1000)
 	client, err := mongo.Connect(context.TODO(), opts)
 	if err != nil {
 		panic(err)
@@ -203,7 +203,7 @@ func queryPrometheus(fun string, node string, startTime time.Time, endTime time.
 	}
 	req.URL.RawQuery = params.Encode()
 	res, _ := http.DefaultClient.Do(req)
-	var resBody, _ = ioutil.ReadAll(res.Body)
+	var resBody, _ = io.ReadAll(res.Body)
 	if res.StatusCode == 200 {
 		var metric = parsePromData(string(resBody), fun)
 		return metric, nil
@@ -289,12 +289,12 @@ func proxy(c *gin.Context) {
 	fheaders["content-type"] = []string{contenttype}
 	res, err := forwardResponse(node, fun, fheaders, body)
 	paramPairs := c.Request.URL.Query()
-	go logRequest(node, fun, *res, paramPairs)
 	if err != nil {
 		log.Printf("Error %v\n", err)
 		c.Status(http.StatusBadRequest)
 		return
 	}
+	go logRequest(node, fun, *res, paramPairs)
 	var bodyBytes, _ = io.ReadAll(res.Body)
 	if !(res.StatusCode >= 200 && res.StatusCode <= 299) {
 		fmt.Printf("Error %v from OpenFaaS: %v\n", res.StatusCode, string(bodyBytes))
