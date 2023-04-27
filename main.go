@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
@@ -203,19 +204,20 @@ func queryPrometheus(fun string, node string, startTime time.Time, endTime time.
 	}
 	req.URL.RawQuery = params.Encode()
 	res, _ := http.DefaultClient.Do(req)
-	var resBody, _ = io.ReadAll(res.Body)
 	if res.StatusCode == 200 {
+		var resBody, _ = io.ReadAll(res.Body)
 		var metric = parsePromData(string(resBody), fun)
 		return metric, nil
 	}
-	return nil, nil
+	return nil, errors.New("request failed")
 }
 
 func logMongo(fun string, node string, startTime time.Time, endTime time.Time, duration time.Duration, computation time.Duration, params map[string][]string) {
-	var mem, cpu [][]interface{}
 	var p = make(map[string]string)
-	mem, _ = queryPrometheus(fun, node, startTime, endTime, "memory")
-	cpu, _ = queryPrometheus(fun, node, startTime, endTime, "cpu")
+
+	// cpu or mem might be nil if prometeus fails
+	mem, _ := queryPrometheus(fun, node, startTime, endTime, "memory")
+	cpu, _ := queryPrometheus(fun, node, startTime, endTime, "cpu")
 	for key, values := range params {
 		p[key] = values[0]
 	}
