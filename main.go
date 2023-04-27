@@ -203,11 +203,13 @@ func queryPrometheus(fun string, node string, startTime time.Time, endTime time.
 		params.Add("query", cpuQuery)
 	}
 	req.URL.RawQuery = params.Encode()
-	res, _ := http.DefaultClient.Do(req)
-	if res.StatusCode == 200 {
-		var resBody, _ = io.ReadAll(res.Body)
-		var metric = parsePromData(string(resBody), fun)
-		return metric, nil
+	res, err := http.DefaultClient.Do(req)
+	if err == nil {
+		if res.StatusCode == 200 {
+			var resBody, _ = io.ReadAll(res.Body)
+			var metric = parsePromData(string(resBody), fun)
+			return metric, nil
+		}
 	}
 	return nil, errors.New("request failed")
 }
