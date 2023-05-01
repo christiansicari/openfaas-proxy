@@ -311,5 +311,4 @@ func main() {
 	go dataMonitor()
 	router.POST("/proxy", proxy)
 	router.Run(config.ListeningHost)
-	_ = 1
 }

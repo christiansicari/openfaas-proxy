@@ -1,0 +1,30 @@
+{
+  "nodes": {
+    "localhost": {
+      "of": "http://localhost:8080/function/",
+      "prom": "http://node.local:31005/"
+    },
+    "ws": {
+      "of": "http://node.local:32006/function/",
+      "prom": "http://node.local:31005/"
+    },
+    "laptop": {
+      "of": "http://laptop.node.local:31112/function/",
+      "prom": "http://laptop.node.local:31837/"
+    },
+    "edge1": {
+      "of": "http://ms0632node.local:8080/function/",
+      "prom": "http://node.local:31005/"
+    },
+    "edge2": {
+      "of": "http://ms0631node.local:8080/function/",
+      "prom": "http://node.local:31005/"
+    }
+  },
+  "mongo": "mongodb://user:pass@node.local:29097",
+  "db": "rpulsar",
+  "coll": "logs",
+  "bufferSize": 10,
+  "timeoutFlush": 10,
+  "listeningHost": "localhost:8000"
+}
